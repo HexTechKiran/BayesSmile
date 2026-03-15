@@ -1,10 +1,17 @@
+import os
+
+if "KERAS_BACKEND" not in os.environ:
+    os.environ["KERAS_BACKEND"] = "jax"
+
 import pandas as pd
 import numpy as np
-import jax
 import bayesflow as bf
 import keras
+import jax
 import QuantLib as ql
 import matplotlib.pyplot as plt
+
+jax.config.update('jax_default_device', jax.devices('cpu')[0])
 
 SPOT_MEAN = 100
 SPOT_STD = 15
@@ -17,6 +24,7 @@ KAPPA_STD = 0.25
 
 SIGMA_MEAN = 0.66
 SIGMA_STD = 0.15
+SIGMA_SCALE = 10 # Linear scaling parameter for model fitting
 
 RHO_ALPHA = 2
 RHO_BETA = 5
@@ -48,7 +56,7 @@ def to_kappa(norm_draw):
 
 def draw_sigma(upper_bound) :
     epsilon = 10 ** (-6)
-    return np.random.beta(6, 6) * (0.9 * upper_bound) + epsilon
+    return (np.random.beta(6, 6) * (0.9 * upper_bound) + epsilon) * SIGMA_SCALE
 
 def draw_rho() :
     # Here we force this value negative and bound it at -0.9 to avoid over-correlating our processes
@@ -68,12 +76,13 @@ def draw_priors() :
             "sigma":sigma,
             "rho":rho}
 
-def single_heston_draw(spot, v0, theta, kappa, sigma, rho, steps=2520, dt=1/2520):
+def single_heston_draw(spot, v0, theta, kappa, sigma, rho, steps=2520, dt=1/2520, maturity=1.0):
     # Transform draws for spot, v0, theta, and kappa into the correct space
     spot = to_spot(spot)
     v0 = to_v0(v0)
     theta = to_theta(theta)
     kappa = to_kappa(kappa)
+    sigma = sigma / SIGMA_SCALE
 
     spot_quote = ql.SimpleQuote(spot)
     yield_ts = ql.YieldTermStructureHandle(ql.FlatForward(0, ql.UnitedStates(ql.UnitedStates.NYSE), 0.05, ql.Actual365Fixed()))
@@ -81,41 +90,98 @@ def single_heston_draw(spot, v0, theta, kappa, sigma, rho, steps=2520, dt=1/2520
 
     process = ql.HestonProcess(yield_ts, div_ts, ql.QuoteHandle(spot_quote), v0, kappa, theta, sigma, rho, ql.HestonProcess.QuadraticExponentialMartingale)
 
-    # Initialize path arrays
-    x = np.zeros(steps + 1)
-    v = np.zeros(steps + 1)
-    x[0], v[0] = spot, v0
+    # Create a gaussian random sequence
+    sequence_generator = ql.UniformRandomSequenceGenerator(2 * steps, ql.UniformRandomGenerator())
+    gaussian_sequence_generator = ql.GaussianRandomSequenceGenerator(sequence_generator)
 
-    state = ql.Array(2)
-    # we use log prices because the Heston Process uses log prices internally
-    state[0], state[1] = np.log(spot), v0
+    # Define a path generator for this process
+    time_grid = ql.TimeGrid(maturity, steps)
+    path_generator = ql.GaussianMultiPathGenerator(
+    process,
+    time_grid,
+    gaussian_sequence_generator,
+    False # Brownian bridge flag
+    )
 
-    dw = np.random.standard_normal((steps, 2)) # Standard Normal shocks
+    # Generate the price path
+    sample = path_generator.next()
+    multi_path = sample.value()
 
-    t = 0.0
-    for i in range(1, steps + 1):
-        state = process.evolve(t, state, dt, ql.Array([dw[i-1, 0], dw[i-1, 1]]))
-        x[i] = np.exp(state[0])
-        v[i] = state[1]
-        t += dt
+    price_path = np.array([multi_path[0][i] for i in range(steps + 1)])
 
-    return dict(path=x, v0=v0, theta=theta, kappa=kappa, sigma=sigma, rho=rho)
+    # Calculate and return log prices
+    log_returns = np.log(price_path[1:] / price_path[:-1])
 
-priors = np.asarray([list(draw_priors().values()) for _ in range(1000)]).T
-prior_samples = dict(spot=priors[0], v0=priors[1], theta=priors[2], kappa=priors[3], sigma=priors[4], rho=priors[5])
-paths = [single_heston_draw(*prior) for prior in priors.T]
+    return dict(log_returns=log_returns)
 
-"""
-grid2 = bf.diagnostics.plots.pairs_samples(
+simulator = bf.make_simulator([draw_priors, single_heston_draw])
+
+prior_samples = simulator.simulators[0].sample(1000)
+
+grid = bf.diagnostics.plots.pairs_samples(
     prior_samples, variable_keys=["spot", "v0", "theta", "kappa", "sigma", "rho"]
 )
 
-plt.show()
-"""
+plt.savefig("HSVtest_diagnostic_pairplot.png")
 
-log_paths = []
-raw_paths = [path['path'] for path in paths]
-for path in paths: log_paths.append(np.log(path["path"]))
-for path in raw_paths: plt.plot(path)
+posterior_samples = simulator.sample(1000)
 
-plt.show()
+paths = posterior_samples['log_returns']
+price_paths = []
+
+
+for path in paths:
+    spot = np.random.normal(100, 2)
+    price_path = spot * np.exp(np.cumsum(np.concatenate([[0], path])))
+    plt.plot(price_path)
+
+plt.savefig("HSVtest_price_path.png")
+
+adapter = (
+    bf.adapters.Adapter()
+    .convert_dtype("float64", "float32")
+    .as_time_series("log_returns")
+    .standardize(include="log_returns", mean=0, std=0.004)
+    .standardize(include="rho", mean=-0.307, std=0.1435)
+    .concatenate(["v0", "theta", "kappa", "sigma", "rho"], into="inference_variables")
+    .rename("log_returns", "summary_variables")
+)
+
+summary_net = bf.networks.TimeSeriesNetwork(dropout=0.1)
+
+inference_net = bf.networks.DiffusionModel(dropout=0.1)
+
+workflow = bf.BasicWorkflow(
+    simulator=simulator,
+    adapter=adapter,
+    summary_network=summary_net,
+    inference_network=inference_net,
+    checkpoint_path="motion_workflow/"
+)
+
+train = workflow.simulate(10000)
+validation = workflow.simulate(300)
+
+history = workflow.fit_offline(data=train,
+                               epochs=100,
+                               batch_size=32,
+                               validation_data=validation)
+
+f = bf.diagnostics.plots.loss(history)
+plt.savefig("HSVtest_loss.png")
+
+num_datasets = 300
+num_samples = 1000
+
+# Simulate 300 scenarios
+print("Running simulations")
+test_sims = workflow.simulate(num_datasets)
+
+# Obtain num_samples posterior samples per scenario
+print("Sampling")
+samples = workflow.sample(conditions=test_sims, num_samples=num_samples)
+
+print("Making plots")
+f = bf.diagnostics.plots.recovery(samples, test_sims)
+
+plt.savefig("HSVtest_posterior_plot.png")
