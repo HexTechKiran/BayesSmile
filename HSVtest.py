@@ -11,8 +11,6 @@ import jax
 import QuantLib as ql
 import matplotlib.pyplot as plt
 
-jax.config.update('jax_default_device', jax.devices('cpu')[0])
-
 SPOT_MEAN = 100
 SPOT_STD = 15
 
