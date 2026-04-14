@@ -3,7 +3,7 @@ from scipy.special import gamma
 from utils import bs, bsinv
 
 
-class rHeston(object):
+class rHeston:
     """
     Class for pricing under the rough Heston model of El Euch & Rosenbaum (2016).
 
@@ -282,10 +282,10 @@ class rHeston(object):
         V_path = np.zeros((N, 1 + s))
         V_path[:, 0] = V0
 
-        # Pre-compute kernel weights: w_k = (k+1)^{alpha-1} * dt for k=0,...,s-1
-        # kernel[k] is the weight for the lag of (k+1) steps, i.e. (t - t_j) = (k+1)*dt
+        # Pre-compute kernel weights: w_k = (k*dt)^{alpha-1} * dt / Gamma(alpha) for k=1,...,s
+        # kernel[k-1] is the weight for lag k steps, i.e. (t - t_j) = k*dt
         k_idx   = np.arange(1, s + 1, dtype=float)
-        kernel  = k_idx**(alpha - 1) * dt / G_a   # shape (s,)
+        kernel  = k_idx**(alpha - 1) * (dt ** alpha) / G_a   # shape (s,)
 
         for i in range(1, 1 + s):
             # Lags: for step i, the j-th term has lag (i - j) steps, j = 0,...,i-1
