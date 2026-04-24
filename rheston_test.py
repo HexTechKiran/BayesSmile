@@ -21,7 +21,8 @@ V0       = 0.04
 def draw_rh_priors():
     rho   = -(np.random.beta(2, 2) / np.sqrt(2))           # in (-1/sqrt(2), 0)
     nu    = float(np.clip(np.random.gamma(4, 0.125), 0.05, 2.0))
-    alpha = float(np.random.beta(4, 6) * 0.48 + 0.51)      # in (0.51, 0.99)
+    #alpha = float(np.random.beta(4, 6) * 0.48 + 0.51)      # in (0.51, 0.99)
+    alpha = 0.99
     return dict(rho=float(rho), nu=float(nu), alpha=float(alpha))
 
 def sample_rh(rho, nu, alpha, n=N_STEPS, T=T):
@@ -42,7 +43,8 @@ def sample_rh(rho, nu, alpha, n=N_STEPS, T=T):
     dW_p     = rh.dB_price(dW1, dW2)
     S_path   = rh.S(V_path, dW_p, S0=1.0)[0]   # shape (n+1,), take first (only) path
 
-    log_returns = np.log(S_path[1:] / S_path[:-1]).astype(np.float32)  # shape (n,)
+    #log_returns = np.log(S_path[1:] / S_path[:-1]).astype(np.float32)  # shape (n,)
+    log_returns = S_path
     return dict(log_returns=log_returns)
 
 simulator = bf.make_simulator([draw_rh_priors, sample_rh])
@@ -63,12 +65,15 @@ print("  Saved rheston_prior_pairplot.png")
 output_samples = simulator.sample(1000)['log_returns']
 
 for path in output_samples:
-    prices = 100 * np.exp(np.cumsum(np.concatenate([[0], path])))
-    plt.plot(prices)
+    #prices = 100 * np.exp(np.cumsum(np.concatenate([[0], path])))
+    plt.plot(path)
+
 
 grid.figure.suptitle("Rough Heston Output samples")
-plt.savefig("rheston_output_samples.png")
+plt.savefig("rheston_output_samples_a99.png")
 plt.close()
+
+"""
 
 adapter = (
     bf.adapters.Adapter()
@@ -172,3 +177,4 @@ workflow.approximator.save("rheston_model.keras")
 print("  Saved rheston_model.keras")
 
 print("\nDone.")
+"""

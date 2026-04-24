@@ -6,7 +6,7 @@ import jax
 
 jax.config.update('jax_default_device', jax.devices('cpu')[0])
 
-prefix = "HSV_noTK_logpath_"
+prefix = "HSV_sigrho_logpath_"
 
 import jax
 jax.devices()
@@ -52,36 +52,43 @@ def to_kappa(norm_draw):
     scaled_norm = norm_draw * log_std + log_mean
     return np.exp(scaled_norm)
 
+def to_rho(norm_draw):
+    mean = RHO_ALPHA / (RHO_ALPHA + RHO_BETA)
+    var = RHO_ALPHA + RHO_BETA
+    adjusted_norm = norm_draw * np.sqrt(var) + mean
+    sigmoid_draw = 1.0 / (1.0 + np.exp(-adjusted_norm))
+    # Here we force this value negative and bound it at -0.9 to avoid over-correlating our processes
+    return sigmoid_draw * -0.9 - 0.05
+
 def draw_sigma(upper_bound) :
     epsilon = 10 ** (-6)
     return (np.random.beta(6, 6) * (0.9 * upper_bound) + epsilon) * SIGMA_SCALE
 
 def draw_rho() :
-    # Here we force this value negative and bound it at -0.9 to avoid over-correlating our processes
     return np.random.beta(RHO_ALPHA, RHO_BETA) * -0.9 - 0.05
 
 def draw_priors():
-    #spot = np.random.normal()
     # spot = 100
     v0 = np.random.normal()
-    #theta = np.random.normal()
-    #kappa = np.random.normal()
+    theta = np.random.normal()
+    kappa = np.random.normal()
     sigma = draw_sigma(upper_bound=np.sqrt(2*1*0.04))
-    rho = draw_rho()
+    rho = np.random.normal()
     return {#"spot":spot,
             "v0":v0,
-            #"theta":theta,
-            #"kappa":kappa,
+            "theta":theta,
+            "kappa":kappa,
             "sigma":sigma,
             "rho":rho}
 
-def single_heston_draw(v0, sigma, rho, spot=100, steps=500, dt=1/500, maturity=1.0):
+def single_heston_draw(v0, theta, kappa, sigma, rho, spot=100, steps=500, dt=1/500, maturity=1.0):
     # Transform draws for spot, v0, theta, and kappa into the correct space
     # spot = to_spot(spot)
     v0 = to_v0(v0)
-    theta = 0.04#to_theta(theta)
-    kappa = 1#to_kappa(kappa)
+    theta = to_theta(theta)
+    kappa = to_kappa(kappa)
     sigma = sigma / SIGMA_SCALE
+    rho = to_rho(rho)
 
     spot_quote = ql.SimpleQuote(spot)
     yield_ts = ql.YieldTermStructureHandle(ql.FlatForward(0, ql.UnitedStates(ql.UnitedStates.NYSE), 0.05, ql.Actual365Fixed()))
@@ -152,7 +159,7 @@ adapted_sims = adapter(simulator.sample(100))
 for k, v in adapted_sims.items():
     print(k, v.shape)
 
-summary_net = bf.networks.TimeSeriesNetwork(dropout=0.1)
+summary_net = bf.networks.TimeSeriesTransformer(dropout=0.1)
 
 inference_net = bf.networks.FlowMatching(dropout=0.1)
 
