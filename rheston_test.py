@@ -11,7 +11,7 @@ from rHeston import rHeston
 
 jax.config.update("jax_default_device", jax.devices("cpu")[0])
 
-N_STEPS  = 500
+N_STEPS  = 100
 T        = 1.0
 
 LAMBDA   = 2.0
@@ -21,14 +21,13 @@ V0       = 0.04
 def draw_rh_priors():
     rho   = -(np.random.beta(2, 2) / np.sqrt(2))           # in (-1/sqrt(2), 0)
     nu    = float(np.clip(np.random.gamma(4, 0.125), 0.05, 2.0))
-    #alpha = float(np.random.beta(4, 6) * 0.48 + 0.51)      # in (0.51, 0.99)
-    alpha = 0.99
+    alpha = float(np.random.beta(2, 5) * 0.30 + 0.55)      # in (0.55, 0.85), mode ~0.60
     return dict(rho=float(rho), nu=float(nu), alpha=float(alpha))
 
-def sample_rh(rho, nu, alpha, n=N_STEPS, T=T):
+def sample_rh(rho, nu, alpha, n=N_STEPS, T=T, N_paths=1):
     rh = rHeston(
         n       = n,
-        N       = 1,           # single path per simulation draw
+        N       = N_paths,
         T       = T,
         alpha   = alpha,
         lambda_ = LAMBDA,
@@ -41,11 +40,11 @@ def sample_rh(rho, nu, alpha, n=N_STEPS, T=T):
     dW1, dW2 = rh.dW()
     V_path   = rh.V(dW1)
     dW_p     = rh.dB_price(dW1, dW2)
-    S_path   = rh.S(V_path, dW_p, S0=1.0)[0]   # shape (n+1,), take first (only) path
+    S_paths  = rh.S(V_path, dW_p, S0=1.0)        # shape (N_paths, n+1)
 
-    #log_returns = np.log(S_path[1:] / S_path[:-1]).astype(np.float32)  # shape (n,)
-    log_returns = S_path
-    return dict(log_returns=log_returns)
+    # log_returns = np.log(S_paths[:, 1:] / S_paths[:, :-1]).astype(np.float32)  # (N_paths, n)
+    return dict(log_returns=S_paths[0])  # average over paths, shape (n,)
+
 
 simulator = bf.make_simulator([draw_rh_priors, sample_rh])
 
@@ -65,48 +64,41 @@ print("  Saved rheston_prior_pairplot.png")
 output_samples = simulator.sample(1000)['log_returns']
 
 for path in output_samples:
-    #prices = 100 * np.exp(np.cumsum(np.concatenate([[0], path])))
+    # prices = 100 * np.exp(np.cumsum(np.concatenate([[0], path])))
     plt.plot(path)
 
-
 grid.figure.suptitle("Rough Heston Output samples")
-plt.savefig("rheston_output_samples_a99.png")
+plt.savefig("rheston_output_samples.png")
 plt.close()
-
-"""
 
 adapter = (
     bf.adapters.Adapter()
     .convert_dtype("float64", "float32")
-    .as_time_series("log_returns")                          # (T, 1) time-series tensor
-    .standardize(include="rho",   mean=-0.354, std=0.158)
-    .standardize(include="nu",    mean=0.500,  std=0.249)
-    .standardize(include="alpha", mean=0.702,  std=0.071)
     .concatenate(["rho", "nu", "alpha"], into="inference_variables")
-    .rename("log_returns", "summary_variables")
+    .rename("log_returns", "inference_conditions")
 )
 
-summary_net = bf.networks.TimeSeriesNetwork(dropout=0.05)
-inference_net = bf.networks.DiffusionModel(dropout=0.05)
+#summary_net = bf.networks.TimeSeriesNetwork(dropout=0.05)
+inference_net = bf.networks.StableConsistencyModel()
 
 workflow = bf.BasicWorkflow(
     simulator        = simulator,
     adapter          = adapter,
-    summary_network  = summary_net,
+    # summary_network  = summary_net,
     inference_network= inference_net,
     checkpoint_filepath = "rheston_workflow/",
 )
 
 print("Simulating training data (10 000 draws)...")
-train = workflow.simulate((10_000,))
+train = workflow.simulate((5_000,))
 
 print("Simulating validation data (500 draws)...")
-validation = workflow.simulate((500,))
+validation = workflow.simulate((300,))
 
 print("Training the amortised posterior...")
 history = workflow.fit_offline(
     data            = train,
-    epochs          = 100,
+    epochs          = 50,
     batch_size      = 32,
     validation_data = validation,
 )
@@ -117,7 +109,7 @@ plt.close()
 print("  Saved rheston_loss.png")
 
 NUM_TEST    = 300
-NUM_SAMPLES = 1000
+NUM_SAMPLES = 300
 
 print(f"Simulating {NUM_TEST} test scenarios...")
 test_sims = workflow.simulate((NUM_TEST,))
@@ -177,4 +169,3 @@ workflow.approximator.save("rheston_model.keras")
 print("  Saved rheston_model.keras")
 
 print("\nDone.")
-"""
